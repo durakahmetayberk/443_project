@@ -56,7 +56,7 @@ static uint32_t clamp(uint32_t v, uint32_t lo, uint32_t hi)
    PI1 — GPIO / TIMERS / BASIC UI
    ========================= */
 
-// Mock: start-button press (EXTI in real hw)
+// Mock: start-button press
 int pi1_button_pressed(void)
 {
     // For demo: press on every iteration start
@@ -231,6 +231,7 @@ void run_one_round(void)
 {
     // Reset score improvement flag at start of each round
     g_score_improved = false;
+    g_time = 0;
 
     // IDLE
     state_to_idle();
