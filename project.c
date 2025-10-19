@@ -1,3 +1,4 @@
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +32,6 @@ typedef enum
 } sys_state_t;
 
 static sys_state_t g_state = ST_IDLE;
-static uint16_t g_difficulty = 50;            // 0..100 via potentiometer (PI3)
 static uint32_t g_random_wait_ms = 0;         // PI1
 static uint32_t g_visual_ms = 0;              // PI2
 static uint32_t g_tactile_ms = 0;             // PI3
@@ -64,14 +64,14 @@ int pi1_button_pressed(void)
     return 1;
 }
 
-// Mock: random wait 1–3 s, scaled by difficulty (harder → shorter)
-uint32_t pi1_compute_random_wait_ms(uint16_t difficulty_0_100)
+// Mock: random wait 1–3 s
+uint32_t pi1_compute_random_wait_ms(void)
 {
     uint32_t span = RANDOM_WAIT_MAX_MS - RANDOM_WAIT_MIN_MS;
     // Generate a real random number within the span
     uint32_t random_offset = rand() % (span + 1);
     uint32_t res = RANDOM_WAIT_MIN_MS + random_offset;
-    printf("[PI1] Random wait chosen = %ums (diff=%u)\n", res, difficulty_0_100);
+    printf("[PI1] Random wait chosen = %ums\n", res);
     return res;
 }
 
@@ -92,16 +92,50 @@ void pi1_7seg_show_ms(const char *label, uint32_t ms)
 {
     printf("[PI1] 7SEG: %s = %u ms\n", label, ms);
 }
+
+
 /* =========================
    PI2 — IC/OC: ULTRASONIC VISUAL MEASURE
    ========================= */
 
+    /* =========================
+    Simple Mock Data: [visual_time, tactile_time] for 6 rounds
+    ========================= */
+
+    // Each round has 2 values: [visual_detection_time, tactile_detection_time]
+    // Times are in milliseconds from start of round
+static const uint32_t round_data[6][2] = {
+    {2350, 2530},  // Round 1: Normal - visual at 350ms, tactile 180ms later
+    {500,  700},   // Round 2: Early (false start) - visual too early
+    {2400, 2580},  // Round 3: Normal - visual at 400ms, tactile 180ms later
+    {3500, 3700},  // Round 4: Timeout - visual too late (>1200ms window)
+    {2300, 2480},  // Round 5: Normal - visual at 300ms, tactile 180ms later
+    {2450, 2630}   // Round 6: Normal - visual at 450ms, tactile 180ms later
+};
+
 // Mock: visual sensor detection function
 int visual_sensor_output(uint32_t mock_time)
 {
-    // Simulate sensor detection based on some condition
-    // For now, return 0 (no detection) - you can implement actual logic here
-    return 0;
+    if (g_round_ix < 1 || g_round_ix > 6)
+        return 0;
+    
+    // Mock: Get visual detection time for current round
+    uint32_t visual_time = round_data[g_round_ix - 1][0];
+    
+    // Return 1 if we've reached visual detection time
+    return (mock_time >= visual_time) ? 1 : 0;
+}
+
+int tactile_sensor_output(uint32_t mock_time)
+{
+    if (g_round_ix < 1 || g_round_ix > 6)
+        return 0;
+    
+    // Mock: Get tactile detection time for current round
+    uint32_t tactile_time = round_data[g_round_ix - 1][1];
+    
+    // Return 1 if we've reached tactile detection time
+    return (mock_time >= tactile_time) ? 1 : 0;
 }
 
 // Mock: hand crosses sensor after LED→GREEN; returns measured ms or 0 if timeout
@@ -121,15 +155,6 @@ uint32_t pi2_capture_visual_ms(uint32_t window_ms)
 /* =========================
    PI3 — ADC + UART: PRESSURE / POT / REPORT
    ========================= */
-
-// Mock: read potentiometer via ADC → difficulty
-uint16_t pi3_read_pot_difficulty(void)
-{
-    // Wave between 30..80 to show variety
-    uint16_t d = 30 + (g_round_ix * 7) % 51;
-    printf("[PI3] Pot difficulty read = %u\n", d);
-    return d;
-}
 
 // Mock: read pressure ADC value
 uint16_t pi3_read_pressure_adc(void)
@@ -204,17 +229,17 @@ void state_to_feedback(void)
    ========================= */
 void run_one_round(void)
 {
+    // Reset score improvement flag at start of each round
+    g_score_improved = false;
+
     // IDLE
     state_to_idle();
     if (!pi1_button_pressed())
         return;
 
-    // Read difficulty (pot) — PI3
-    g_difficulty = pi3_read_pot_difficulty();
-
     // ARMED
     g_state = ST_ARMED;
-    g_random_wait_ms = pi1_compute_random_wait_ms(g_difficulty);
+    g_random_wait_ms = pi1_compute_random_wait_ms();
 
     // Early hand? (false trigger) — PI2
     for (int t = g_time; t < g_random_wait_ms; t += 1)
@@ -256,7 +281,8 @@ void run_one_round(void)
     for (int t = tactile_start_time; t < tactile_start_time + TACTILE_WINDOW_MS; t += 1)
     {
         uint16_t adc = pi3_read_pressure_adc();
-        if (adc >= PRESSURE_THRESHOLD)
+        // if pressure threshold crossed and within window
+        if (adc >= PRESSURE_THRESHOLD && tactile_sensor_output(t))
         {
             g_tactile_ms = t - tactile_start_time;
             g_state = ST_TACT_DONE;
@@ -276,9 +302,11 @@ void run_one_round(void)
     // REPORT
     g_state = ST_REPORT;
     uint32_t total = g_visual_ms + (g_tactile_ms);
-    if (total < g_best_total_ms)
+    if (total < g_best_total_ms){
         g_best_total_ms = total;
-    g_score_improved = true;
+        g_score_improved = true;
+    }
+       
     pi1_7seg_show_ms("TOT", total);
     pi3_uart_send_result(g_round_ix, g_random_wait_ms, g_visual_ms, g_tactile_ms, total, g_best_total_ms);
 
